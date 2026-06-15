@@ -33,7 +33,15 @@ CREATE INDEX IF NOT EXISTS idx_symbol_date ON stock_daily (symbol, date);
 
 def _bs_fetch_batch(tasks: list) -> list:
     """多进程 worker：独立 login，批量拉取 baostock 数据。"""
+    import socket
+
     import baostock as bs
+
+    # worker 自行设置 socket 超时。main.py 的全局 setdefaulttimeout(10.0) 不能覆盖
+    # 到此处之前：在 Pool 创建阶段它会污染 forkserver 认证握手所用的内部 socket
+    # （带超时的 socket 会被置为非阻塞，os.read 在 deliver_challenge 时抛
+    # BlockingIOError）。握手完成后再由 worker 自行启用超时即可。
+    socket.setdefaulttimeout(10.0)
     bs.login()
     results = []
     for symbol, bs_code, start, end in tasks:
@@ -96,6 +104,7 @@ class DataEngine:
 
     def sync_today_bulk(self) -> int:
         """多进程并行通过 baostock 拉取增量数据（后复权），写入 SQLite。"""
+        import socket
         from datetime import date, timedelta
         from multiprocessing import Pool
 
@@ -128,8 +137,16 @@ class DataEngine:
         n_workers = min(8, len(tasks))
         chunks = [tasks[i::n_workers] for i in range(n_workers)]
 
-        with Pool(n_workers) as pool:
-            batch_results = pool.map(_bs_fetch_batch, chunks)
+        # 临时关闭全局 socket 超时：forkserver 启动 / 认证握手所用的内部 socket 若
+        # 带超时会被置为非阻塞，os.read 在 deliver_challenge 时抛 BlockingIOError。
+        # worker 进程会在握手完成后自行 setdefaulttimeout(10.0)，见 _bs_fetch_batch。
+        _saved_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(None)
+        try:
+            with Pool(n_workers) as pool:
+                batch_results = pool.map(_bs_fetch_batch, chunks)
+        finally:
+            socket.setdefaulttimeout(_saved_timeout)
 
         all_rows = []
         for batch in batch_results:
