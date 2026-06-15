@@ -7,18 +7,19 @@
 
 import argparse
 import sys
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from datetime import date
-
 import socket
+
 socket.setdefaulttimeout(10.0)
 
 from sequoia_x.core.config import get_settings
 from sequoia_x.core.logger import get_logger
 from sequoia_x.data.engine import DataEngine
-from sequoia_x.notify.feishu import FeishuNotifier
+from sequoia_x.notify.html import HtmlNotifier
 from sequoia_x.strategy.base import BaseStrategy
 from sequoia_x.strategy.high_tight_flag import HighTightFlagStrategy
 from sequoia_x.strategy.limit_up_shakeout import LimitUpShakeoutStrategy
@@ -73,24 +74,21 @@ def main() -> None:
             PrivatePlacementStrategy(engine=engine, settings=settings),
         ]
 
-        notifier = FeishuNotifier(settings)
+        notifier = HtmlNotifier(settings)
 
-        # 5. 遍历策略，有结果则推送至对应机器人
+        # 5. 顺序执行策略，收集结果后统一渲染为 HTML 报告
+        results: list[tuple[str, list[str]]] = []
+
         for strategy in strategies:
             strategy_name = type(strategy).__name__
             logger.info(f"执行策略：{strategy_name}")
 
             selected: list[str] = strategy.run()
             logger.info(f"{strategy_name} 选出 {len(selected)} 只股票")
+            results.append((strategy_name, selected))
 
-            if selected:
-                notifier.send(
-                    symbols=selected,
-                    strategy_name=strategy_name,
-                    webhook_key=strategy.webhook_key,
-                )
-            else:
-                logger.info(f"{strategy_name} 无选股结果，跳过推送")
+        report_path = notifier.render_report(results)
+        logger.info(f"HTML 报告已生成：{report_path.resolve()}")
 
     except Exception:
         try:
